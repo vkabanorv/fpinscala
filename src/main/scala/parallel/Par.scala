@@ -52,6 +52,8 @@ object Par {
     def map[A,B](pa: Par[A])(f: A => B): Par[B] =
         map2(pa, unit(()))((a,_) => f(a))
 
+    def sortPar(parList: Par[List[Int]]): Par[List[Int]] = map(parList)(_.sorted)
+
     def filter[A](pa: Par[List[A]])(f: A => Boolean): Par[List[A]] =
         map(pa)(a => a.filter(f))
 
@@ -61,8 +63,25 @@ object Par {
     def foldRight[A,B](pa: Par[List[A]])(z: B)(f: (A,B) => B): Par[B] =
         map(pa)(a => a.foldRight(z)(f))
 
-    def sequence[A](ps: List[Par[A]]): Par[List[A]] =
+    def sequence_simple[A](ps: List[Par[A]]): Par[List[A]] =
         ps.foldRight[Par[List[A]]](unit(Nil: List[A]))( (a, as) => map2(a, as)( (a,as) => a :: as))
+
+    def sequenceRight[A](as: List[Par[A]]): Par[List[A]] =
+        as match {
+            case Nil => unit(Nil)
+            case h :: t => map2(h, fork(sequenceRight(t)))(_ :: _)
+        }
+
+    def sequenceBalanced[A](as: IndexedSeq[Par[A]]): Par[IndexedSeq[A]] =
+        if (as.isEmpty) unit(Vector())
+        else if (as.length == 1) map(as.head)(a => Vector(a))
+        else {
+            val (l,r) = as.splitAt(as.length/2)
+            map2(sequenceBalanced(l), sequenceBalanced(r))(_ ++ _)
+        }
+
+    def sequence[A](as: List[Par[A]]): Par[List[A]] =
+        map(sequenceBalanced(as.toIndexedSeq))(_.toList)
 
     def parMap[A,B](s: List[A])(f: A => B): Par[List[B]] = {
         val fbs: List[Par[B]] = s.map(asyncF(f))
@@ -89,12 +108,6 @@ object Par {
         map(ps)( (a: List[A]) => a.flatMap(f))
     }
 
-    /*def wordCounts(text: List[String])(regex: String)(es: ExecutorService): Map[String, Int] = {
-        val words = parFlatMap(text)(t => t.split(regex).toList)
-        map(words)(w => w.groupBy(a => a).mapValues(a => a.size))(es).get
-    }
-    */
-
     def chooser[A,B](pa: Par[A])(choices: A => Par[B]): Par[B] =
         es => {
             run(es)( choices(run(es)(pa).get()) )
@@ -106,6 +119,9 @@ object Par {
     def choiceN[A](n: Par[Int])(choices: List[Par[A]]): Par[A] =
         chooser(n)(choices(_))
 
+    def choiceViaChoiceN[A](a: Par[Boolean])(ifTrue: Par[A], ifFalse: Par[A]): Par[A] =
+        choiceN(map(a)(b => if (b) 0 else 1))(List(ifTrue, ifFalse))
+
     def choiceMap[K,V](key: Par[K])(choices: Map[K,Par[V]]): Par[V] =
         chooser(key)(choices(_))
 
@@ -114,10 +130,22 @@ object Par {
             run(es)( b(run(es)(a).get()) )
         }
 
+    def choiceViaFlatMap[A](p: Par[Boolean])(f: Par[A], t: Par[A]): Par[A] =
+        flatMap(p)(b => if (b) t else f)
+
+    def choiceNViaFlatMap[A](p: Par[Int])(choices: List[Par[A]]): Par[A] =
+        flatMap(p)(i => choices(i))
+
     def join[A](a: Par[Par[A]]): Par[A] =
         es => {
             run(es)( run(es)(a).get() )
         }
+
+    def joinViaFlatMap[A](a: Par[Par[A]]): Par[A] =
+        flatMap(a)(x => x)
+
+    def flatMapViaJoin[A,B](p: Par[A])(f: A => Par[B]): Par[B] =
+        join(map(p)(f))
 
     def flatMap2[A,B](a: Par[A])(b: A => Par[B]): Par[B] =
         join(map(a)(b))
@@ -127,4 +155,23 @@ object Par {
 
     def equal[A](p: Par[A], p2: Par[A]): Par[Boolean] =
         Par.map2(p,p2)(_ == _)
+
+    def delay[A](fa: => Par[A]): Par[A] =
+        es => fa(es)
+
+    implicit def toParOps[A](p: Par[A]): ParOps[A] = new ParOps(p)
+
+    class ParOps[A](p: Par[A]) {
+
+    }
+}
+
+object Examples {
+    def sum(ints: IndexedSeq[Int]): Int =
+        if (ints.size <= 1)
+            ints.headOption getOrElse 0
+        else {
+            val (l,r) = ints.splitAt(ints.length/2)
+            sum(l) + sum(r)
+        }
 }
